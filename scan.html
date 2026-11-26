@@ -1,0 +1,428 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <title>Scanner Ingressi · La Caje Events</title>
+  <meta name="theme-color" content="#080809">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bodoni+Moda:ital,wght@0,400;0,500;0,600;1,400;1,500&family=Jost:wght@400;500;600&display=swap">
+  <link rel="stylesheet" href="style.css">
+  <script src="https://unpkg.com/html5-qrcode"></script>
+</head>
+<body>
+  <main class="scan-page">
+    <nav class="page-nav" aria-label="Navigazione">
+      <a href="Index.html">← Torna alla pagina evento</a><span>·</span>
+      <a href="#lista-ingressi">Lista ingressi</a>
+    </nav>
+
+    <section class="scan-wrap">
+      <header class="scan-head">
+        <p class="cap">La Caje Events · Area Organizzatori</p>
+        <h1>Scanner <em>ingressi</em></h1>
+        <div class="yr" aria-hidden="true"><i></i><span>2027</span><i></i></div>
+        <p class="scan-sub">Inquadra il QR Code degli ospiti per registrare l’ingresso nel foglio Google.</p>
+      </header>
+
+      <div class="scan-login" id="loginBox">
+        <form id="loginForm" novalidate>
+          <div class="fld">
+            <label for="staffCode">Codice organizzatore</label>
+            <input
+              id="staffCode"
+              type="password"
+              placeholder="Inserisci il codice staff"
+              autocomplete="current-password"
+              required
+            >
+            <small class="fld-hint">Accesso riservato allo staff addetto agli ingressi.</small>
+          </div>
+          <button class="btn" id="loginBtn" type="submit">Accedi allo scanner</button>
+          <p id="loginMsg" class="err" role="status" aria-live="polite"></p>
+        </form>
+      </div>
+
+      <div id="scannerBox" hidden>
+        <div class="scan-topbar">
+          <div>
+            <p class="cap" id="welcome">Staff</p>
+          </div>
+          <button class="ghost" id="logoutBtn" type="button">Esci</button>
+        </div>
+
+        <div class="scan-stats" aria-live="polite">
+          <div class="is-green">
+            <b id="statEntrati">0</b>
+            <span>Entrati</span>
+          </div>
+          <div>
+            <b id="statMancanti">0</b>
+            <span>Da entrare</span>
+          </div>
+          <div>
+            <b id="statTotale">0</b>
+            <span>Totale</span>
+          </div>
+        </div>
+
+        <div class="scan-card">
+          <div class="scan-actions">
+            <button class="btn" id="toggleScanBtn" type="button">Avvia scanner QR</button>
+            <button class="ghost" id="refreshBtn" type="button">Aggiorna lista</button>
+          </div>
+
+          <div id="reader"></div>
+          <div id="scanResult" class="scan-result" hidden role="status" aria-live="polite"></div>
+
+          <form class="manual-check" id="manualForm" novalidate>
+            <div class="fld">
+              <label for="manualToken">Verifica manuale codice QR</label>
+              <div class="manual-row">
+                <input id="manualToken" type="text" placeholder="Incolla il codice token del QR" autocomplete="off">
+                <button class="ghost" id="manualBtn" type="submit">Verifica</button>
+              </div>
+            </div>
+          </form>
+        </div>
+
+        <section class="guest-list-sec" id="lista-ingressi" aria-labelledby="guests-title">
+          <div class="guest-list-head">
+            <h2 id="guests-title">Lista <em>iscritti</em></h2>
+            <div class="guest-filters" role="group" aria-label="Filtra iscritti">
+              <button class="ghost is-active" type="button" data-filter="all">Tutti</button>
+              <button class="ghost" type="button" data-filter="ENTRATO">Entrati</button>
+              <button class="ghost" type="button" data-filter="DA VERIFICARE">Da entrare</button>
+            </div>
+          </div>
+
+          <div class="fld guest-search">
+            <input id="searchInput" type="text" placeholder="Cerca per nome, cognome o @instagram..." autocomplete="off">
+          </div>
+
+          <ul class="guest-list" id="guestList"></ul>
+          <p class="guest-empty" id="guestEmpty" hidden>Nessun iscritto trovato.</p>
+        </section>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const SHEET_URL = 'https://script.google.com/macros/s/AKfycbwo4Gqvek6dYhQt8wFAuYtQHUfqO4u-QxWRiXk2PHrZP9NsA_pV6UMDSymtzMqLmZGM/exec';
+    const SESSION_KEY = 'lc_staff_tk';
+    const NAME_KEY = 'lc_staff_name';
+
+    const $ = (selector) => document.querySelector(selector);
+    const loginBox = $('#loginBox');
+    const scannerBox = $('#scannerBox');
+    const loginForm = $('#loginForm');
+    const loginBtn = $('#loginBtn');
+    const loginMsg = $('#loginMsg');
+    const staffCodeInput = $('#staffCode');
+    const toggleScanBtn = $('#toggleScanBtn');
+    const refreshBtn = $('#refreshBtn');
+    const logoutBtn = $('#logoutBtn');
+    const scanResult = $('#scanResult');
+    const manualForm = $('#manualForm');
+    const manualToken = $('#manualToken');
+    const searchInput = $('#searchInput');
+    const guestListEl = $('#guestList');
+    const guestEmptyEl = $('#guestEmpty');
+
+    let staffSession = '';
+    let scanner = null;
+    let scanning = false;
+    let busy = false;
+    let guests = [];
+    let activeFilter = 'all';
+
+    async function apiPost(params) {
+      const ac = new AbortController();
+      const timeoutId = setTimeout(() => ac.abort(), 30000);
+      try {
+        const res = await fetch(SHEET_URL, {
+          method: 'POST',
+          body: new URLSearchParams(params),
+          signal: ac.signal
+        });
+        const text = await res.text();
+        try {
+          return JSON.parse(text);
+        } catch (parseErr) {
+          console.error('Risposta non JSON dal server:', res.status, text);
+          throw new Error('Risposta non valida dal server (HTTP ' + res.status + ').');
+        }
+      } finally {
+        clearTimeout(timeoutId);
+      }
+    }
+
+    function handleAuthLoss(message) {
+      stopScanner();
+      staffSession = '';
+      try {
+        sessionStorage.removeItem(SESSION_KEY);
+        sessionStorage.removeItem(NAME_KEY);
+      } catch (err) {}
+      scannerBox.hidden = true;
+      loginBox.hidden = false;
+      loginMsg.textContent = message || 'Sessione scaduta. Accedi di nuovo.';
+    }
+
+    function showScanResult(message, ok, extra) {
+      scanResult.hidden = false;
+      scanResult.className = 'scan-result ' + (ok ? 'is-ok' : 'is-err');
+      scanResult.textContent = (ok ? '✓ ' : '✕ ') + message + (extra ? '\n' + extra : '');
+    }
+
+    function updateStats(stats) {
+      if (!stats) return;
+      $('#statEntrati').textContent = stats.entrati;
+      $('#statMancanti').textContent = stats.mancanti;
+      $('#statTotale').textContent = stats.totale;
+    }
+
+    function renderGuests() {
+      const q = searchInput.value.trim().toLowerCase();
+      const filtered = guests.filter((g) => {
+        if (activeFilter !== 'all' && g.stato !== activeFilter) return false;
+        if (!q) return true;
+        const hay = (g.nome + ' ' + g.cognome + ' ' + g.instagram).toLowerCase();
+        return hay.includes(q);
+      });
+
+      guestListEl.innerHTML = '';
+      guestEmptyEl.hidden = filtered.length > 0;
+
+      filtered.forEach((g) => {
+        const entered = g.stato === 'ENTRATO';
+        const li = document.createElement('li');
+        li.className = 'guest-item' + (entered ? ' is-entered' : '');
+
+        const info = document.createElement('div');
+        info.className = 'guest-info';
+
+        const nameEl = document.createElement('strong');
+        nameEl.textContent = (g.nome + ' ' + g.cognome).trim();
+        info.appendChild(nameEl);
+
+        if (g.instagram) {
+          const igEl = document.createElement('span');
+          igEl.textContent = g.instagram;
+          info.appendChild(igEl);
+        }
+
+        const statusWrap = document.createElement('div');
+        statusWrap.className = 'guest-status';
+
+        const badge = document.createElement('span');
+        badge.className = 'status-badge ' + (entered ? 'is-entered' : 'is-pending');
+        badge.textContent = entered ? '✓ Entrato' : 'Da entrare';
+        statusWrap.appendChild(badge);
+
+        if (entered && g.dataIngresso) {
+          const timeEl = document.createElement('small');
+          timeEl.textContent = g.dataIngresso;
+          statusWrap.appendChild(timeEl);
+        }
+
+        li.appendChild(info);
+        li.appendChild(statusWrap);
+        guestListEl.appendChild(li);
+      });
+    }
+
+    async function loadGuests() {
+      if (!staffSession) return;
+      refreshBtn.disabled = true;
+      try {
+        const res = await apiPost({ action: 'guests', session: staffSession });
+        if (res.authError) {
+          handleAuthLoss(res.error);
+          return;
+        }
+        if (!res.success) throw new Error(res.error || 'Errore nel caricamento.');
+        guests = res.guests || [];
+        updateStats(res.stats);
+        renderGuests();
+      } catch (err) {
+        showScanResult(err.message || 'Impossibile aggiornare la lista.', false);
+      } finally {
+        refreshBtn.disabled = false;
+      }
+    }
+
+    function openScannerArea(session, staffName) {
+      staffSession = session;
+      $('#welcome').textContent = 'Accesso: ' + (staffName || 'Staff');
+      loginBox.hidden = true;
+      scannerBox.hidden = false;
+      loginMsg.textContent = '';
+      loadGuests();
+    }
+
+    loginForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const code = staffCodeInput.value.trim();
+      if (!code) {
+        loginMsg.textContent = 'Inserisci il codice organizzatore.';
+        staffCodeInput.focus();
+        return;
+      }
+
+      loginBtn.disabled = true;
+      loginBtn.textContent = 'Verifica in corso…';
+      loginMsg.textContent = '';
+
+      try {
+        const res = await apiPost({ action: 'login', code });
+        if (!res.success) {
+          throw new Error(res.error || 'Codice non valido.');
+        }
+        try {
+          sessionStorage.setItem(SESSION_KEY, res.session);
+          sessionStorage.setItem(NAME_KEY, res.staffName || 'Staff');
+        } catch (err) {}
+        staffCodeInput.value = '';
+        openScannerArea(res.session, res.staffName);
+      } catch (err) {
+        loginMsg.textContent = err.message || 'Errore durante l’accesso.';
+      } finally {
+        loginBtn.disabled = false;
+        loginBtn.textContent = 'Accedi allo scanner';
+      }
+    });
+
+    async function startScanner() {
+      if (scanning) return;
+      if (typeof Html5Qrcode === 'undefined') {
+        showScanResult('Libreria scanner QR non caricata. Ricarica la pagina.', false);
+        return;
+      }
+
+      scanner = new Html5Qrcode('reader');
+      scanning = true;
+      toggleScanBtn.textContent = 'Ferma scanner';
+
+      try {
+        await scanner.start(
+          { facingMode: 'environment' },
+          { fps: 10, qrbox: { width: 240, height: 240 } },
+          async (decodedText) => {
+            if (busy) return;
+            busy = true;
+            await stopScanner();
+            await processToken(decodedText);
+          },
+          () => {}
+        );
+      } catch (err) {
+        scanning = false;
+        toggleScanBtn.textContent = 'Avvia scanner QR';
+        showScanResult('Impossibile aprire la fotocamera. Controlla i permessi del browser.', false);
+      }
+    }
+
+    async function stopScanner() {
+      if (scanner && scanning) {
+        try {
+          await scanner.stop();
+        } catch (err) {}
+      }
+      scanning = false;
+      toggleScanBtn.textContent = 'Avvia scanner QR';
+    }
+
+    async function validateToken(rawToken) {
+      if (busy) return;
+      busy = true;
+      await processToken(rawToken);
+    }
+
+    async function processToken(rawToken) {
+      const token = String(rawToken || '').trim();
+      if (!token) {
+        busy = false;
+        return;
+      }
+      scanResult.hidden = false;
+      scanResult.className = 'scan-result';
+      scanResult.textContent = 'Verifica biglietto in corso…';
+
+      try {
+        const res = await apiPost({ action: 'checkin', token, session: staffSession });
+        if (res.authError) {
+          handleAuthLoss(res.error);
+          return;
+        }
+
+        if (res.success) {
+          showScanResult(res.message, true, res.ospite + (res.dataIngresso ? ' · ' + res.dataIngresso : ''));
+          const target = guests.find((g) => g.token === token);
+          if (target) {
+            target.stato = 'ENTRATO';
+            target.dataIngresso = res.dataIngresso || '';
+            renderGuests();
+          }
+          await loadGuests();
+        } else {
+          showScanResult(res.message || res.error || 'QR non valido.', false, res.ospite || '');
+        }
+      } catch (err) {
+        console.error('Errore checkin:', err);
+        const detail = err && err.name === 'AbortError'
+          ? 'Il server ci mette troppo a rispondere. Riprova.'
+          : 'Errore di connessione durante la verifica (' + ((err && err.message) || err) + ').';
+        showScanResult(detail, false);
+      } finally {
+        busy = false;
+      }
+    }
+
+    toggleScanBtn.addEventListener('click', () => {
+      if (scanning) stopScanner();
+      else startScanner();
+    });
+
+    refreshBtn.addEventListener('click', loadGuests);
+
+    manualForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const val = manualToken.value.trim();
+      if (!val) return;
+      await validateToken(val);
+      manualToken.value = '';
+    });
+
+    searchInput.addEventListener('input', renderGuests);
+
+    document.querySelectorAll('.guest-filters button').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.guest-filters button').forEach((b) => b.classList.remove('is-active'));
+        btn.classList.add('is-active');
+        activeFilter = btn.dataset.filter;
+        renderGuests();
+      });
+    });
+
+    logoutBtn.addEventListener('click', async () => {
+      const old = staffSession;
+      handleAuthLoss('');
+      loginMsg.textContent = '';
+      if (old) {
+        try {
+          await apiPost({ action: 'logout', session: old });
+        } catch (err) {}
+      }
+    });
+
+    try {
+      const savedSession = sessionStorage.getItem(SESSION_KEY);
+      const savedName = sessionStorage.getItem(NAME_KEY);
+      if (savedSession) {
+        openScannerArea(savedSession, savedName);
+      }
+    } catch (err) {}
+  </script>
+</body>
+</html>
